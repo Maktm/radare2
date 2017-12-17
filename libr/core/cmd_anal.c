@@ -548,7 +548,7 @@ static const char *help_msg_ax[] = {
 	"ax", " addr [at]", "add code ref pointing to addr (from curseek)",
 	"axc", " addr [at]", "add code jmp ref // unused?",
 	"axC", " addr [at]", "add code call ref",
-	"axg", " addr", "show xrefs graph to reach current function",
+	"axg", " [addr]", "show xrefs graph to reach current function",
 	"axd", " addr [at]", "add data ref",
 	"axq", "", "list refs in quiet/human-readable format",
 	"axj", "", "list refs in json format",
@@ -4552,12 +4552,12 @@ static void _anal_calls(RCore *core, ut64 addr, ut64 addr_end) {
 		if (!bufi) {
 			r_io_read_at (core->io, addr, buf, sizeof (buf));
 		}
-		if (!memcmp(buf, block, 4096)) {
+		if (!memcmp (buf, block, 4096)) {
 			//eprintf ("Error: skipping uninitialized block \n");
 			break;
 		}
 		memset (block, 0, 4096);
-		if (!memcmp(buf, block, 4096)) {
+		if (!memcmp (buf, block, 4096)) {
 			//eprintf ("Error: skipping uninitialized block \n");
 			break;
 		}	
@@ -4640,6 +4640,9 @@ static void cmd_anal_calls(RCore *core, const char *input, bool only_print_flag)
 				addr = r->itv.addr;
 				//this normally will happen on fuzzed binaries, dunno if with huge
 				//binaries as well
+				if (r_cons_is_breaked ()) {
+					break;
+				}	
 				if (only_print_flag) {
 					r_cons_printf ("f fcn.0x%08"PFMT64x" %d 0x%08"PFMT64x"\n",
 						addr, r->itv.size, addr);
@@ -4835,6 +4838,7 @@ static void anal_axg (RCore *core, const char *input, int level, Sdb *db) {
 			}
 		}
 	}
+	r_list_free (xrefs);
 }
 
 static void cmd_anal_ucall_ref (RCore *core, ut64 addr) {
@@ -4889,7 +4893,7 @@ static bool cmd_anal_refs(RCore *core, const char *input) {
 	case 'g': // "axg"
 		{
 			Sdb *db = sdb_new0 ();
-			anal_axg (core, input + 2, 0, db);
+			anal_axg (core, input[1] ? input + 2 : NULL, 0, db);
 			sdb_free (db);
 		}
 		break;
@@ -5679,6 +5683,9 @@ R_API int r_core_anal_refs(RCore *core, const char *input) {
 			r_list_foreach (list, iter, map) {
 				from = map->itv.addr;
 				to = r_itv_end (map->itv);
+				if (r_cons_is_breaked ()) {
+					break;
+				}	
 				if (!from && !to) {
 					eprintf ("Cannot determine xref search boundaries\n");
 				} else if (to - from > UT32_MAX) {
@@ -5919,76 +5926,36 @@ static void cmd_anal_aav(RCore *core, const char *input) {
 		}
 		r_list_free (list);
 	} else {
-		RList *list = r_core_get_boundaries (core, analin);
+		RList *list = r_core_get_boundaries_prot (core, 0, analin);
 		RListIter *iter, *iter2;
 		RIOMap *map, *map2;
 		ut64 from = UT64_MAX;
 		ut64 to = UT64_MAX;
 		// find values pointing to non-executable regions
-		// TOO SLOW, but "correct", can be enhanced by adding search.in2
 		r_list_foreach (list, iter2, map2) {
 			if (r_cons_is_breaked ()) {
 				break;
 			}
-			if (!iter2->n) {
-				if (from == UT64_MAX) {
-					from = r_itv_begin (map2->itv);
-					to = r_itv_end (map2->itv);
-				} else {
-					if (r_itv_begin (map2->itv) == to) {
-						to = r_itv_end (map2->itv);
-					}
+			//TODO: Reduce multiple hits for same addr 
+			from = r_itv_begin (map2->itv);
+			to = r_itv_end (map2->itv);
+			eprintf ("Value from 0x%08"PFMT64x " to 0x%08" PFMT64x "\n", from, to);
+			r_list_foreach (list, iter, map) {
+				ut64 begin = map->itv.addr;
+				ut64 end = r_itv_end (map->itv);
+				if (r_cons_is_breaked ()) {
+					break;
 				}
-			} else {
-				if (from == UT64_MAX) {
-					from = r_itv_begin (map2->itv);
-					to = r_itv_end (map2->itv);
+				if (end - begin > UT32_MAX) {
+					eprintf ("Skipping huge range\n");
 					continue;
-				} else {
-					if (r_itv_begin (map2->itv) == to) {
-						to = r_itv_end (map2->itv);
-						continue;
-					}
 				}
-			}
-//			if (r_itv_contain (map->itv, core->offset)) {
-			if (true) { //!(map2->flags & R_IO_EXEC)) {
-//				from = r_itv_begin (map2->itv);
-//				to = r_itv_end (map2->itv);
-
-				eprintf ("Value from 0x%08"PFMT64x " to 0x%08" PFMT64x "\n", from, to);
-				r_list_foreach (list, iter, map) {
-					ut64 begin = map->itv.addr;
-					ut64 end = r_itv_end (map->itv);
-					if (r_cons_is_breaked ()) {
-						break;
-					}
-					if (end - begin > UT32_MAX) {
-						eprintf ("Skipping huge range\n");
-						continue;
-					}
-					eprintf ("aav: 0x%08"PFMT64x"-0x%08"PFMT64x" in 0x%"PFMT64x"-0x%"PFMT64x"\n", from, to, begin, end);
-					(void)r_core_search_value_in_range (core, map->itv, from, to, vsize, asterisk, _CbInRangeAav);
+				eprintf ("aav: 0x%08"PFMT64x"-0x%08"PFMT64x" in 0x%"PFMT64x"-0x%"PFMT64x"\n", from, to, begin, end);
+				(void)r_core_search_value_in_range (core, map->itv, from, to, vsize, asterisk, _CbInRangeAav);
 				}
-			}
-			from = UT64_MAX;
 		}
 		r_list_free (list);
-#if 0
-		s = r_io_section_vget (core->io, core->offset);
-		if (s) {
-			ut64 from = s->vaddr;
-			ut64 to = s->vaddr + s->size;
-			eprintf ("aav: from 0x%"PFMT64x" to 0x%"PFMT64x"\n", from, to);
-			(void)r_core_search_value_in_range (core, (RAddrInterval){from, s->size},
-				from, to, vsize, asterisk, _CbInRangeAav);
-		} else {
-			eprintf ("aav: Cannot find section at this address\n");
-			// TODO: look in debug maps
-		}
-#endif
 	}
-
 	r_cons_break_pop ();
 	// end
 	seti ("search.align", o_align);

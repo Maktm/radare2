@@ -34,6 +34,7 @@ static const char *help_msg_slash[] = {
 	"/m", " magicfile", "search for matching magic file (use blocksize)",
 	"/M", " ", "search for known filesystems and mount them automatically",
 	"/o", " [n]", "show offset of n instructions backward",
+	"/O", " [n]", "same as /o, but with a different fallback if anal cannot be used",
 	"/p", " patternsize", "search for pattern of given size",
 	"/P", " patternsize", "search similar blocks",
 	"/r[erwx]", "[?] sym.printf", "analyze opcode reference an offset (/re for esil)",
@@ -157,10 +158,9 @@ static int search_hash(RCore *core, const char *hashname, const char *hashstr, u
 	RIOMap *map;
 	ut8 *buf;
 	int i, j;
-	RList *list;
 	RListIter *iter;
 
-	list = r_core_get_boundaries_ok (core);
+	RList *list = r_core_get_boundaries_ok (core);
 	if (!list) {
 		eprintf ("Invalid boundaries\n");
 		goto hell;
@@ -595,10 +595,33 @@ R_API RList *r_core_get_boundaries_prot(RCore *core, int protection, const char 
 		}
 	} else if (!strcmp (mode, "io.maps")) { // Non-overlapping RIOMap parts not overriden by others (skyline)
 		const RVector *skyline = &core->io->map_skyline;
+		ut64 begin = UT64_MAX;
+		ut64 end = UT64_MAX;
 		int i;
 		for (i = 0; i < skyline->len; i++) {
 			const RIOMapSkyline *part = skyline->a[i];
-			append_bound (list, NULL, search_itv, part->itv.addr, part->itv.size);
+			ut64 from = part->itv.addr;
+			ut64 to = part->itv.addr + part->itv.size;
+			// eprintf ("--------- %llx %llx    (%llx %llx)\n", from, to, begin, end);
+			if (begin== UT64_MAX) {
+				begin = from;
+			}
+			if (end == UT64_MAX) {
+				end = to;
+			} else {
+				if (end == from) {
+					end = to;
+				} else {
+			//		eprintf ("[%llx - %llx]\n", begin, end);
+					append_bound (list, NULL, search_itv, begin, end - begin);
+					begin = from;
+					end = to;
+				}
+			}
+		}
+		if (end != UT64_MAX) {
+			append_bound (list, NULL, search_itv, begin, end - begin);
+			// eprintf ("-[%llx - %llx]\n", begin, end);
 		}
 	} else if (!strcmp (mode, "io.section")) {
 		RIOSection *s = r_io_section_vget (core->io, core->offset);
@@ -2508,6 +2531,19 @@ reread:
 			addr = UT64_MAX;
 			(void)r_core_asm_bwdis_len (core, NULL, &addr, n);
 		}
+		if (json) {
+			r_cons_printf ("[%"PFMT64u "]", addr);
+		} else {
+			r_cons_printf ("0x%08"PFMT64x "\n", addr);
+		}
+		break;
+	}
+	case 'O': { // "/O" alternative to "/o"
+		ut64 addr, n = input[param_offset - 1] ? r_num_math (core->num, input + param_offset) : 1;
+		if (!n) {
+			n = 1;
+		}
+		addr = r_core_prevop_addr_force (core, core->offset, n);
 		if (json) {
 			r_cons_printf ("[%"PFMT64u "]", addr);
 		} else {
